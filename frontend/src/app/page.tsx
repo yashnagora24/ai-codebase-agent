@@ -19,6 +19,22 @@ import { FileAIPanel } from "@/components/viewer/FileAIPanel";
 import { Alert } from "@/components/ui/Alert";
 import { LoadingPanel } from "@/components/ui/LoadingPanel";
 
+const API_BASE = "/api/backend";
+
+function apiUrl(path: string) {
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function apiFetch(path: string, init: RequestInit) {
+  try {
+    return await fetch(apiUrl(path), init);
+  } catch {
+    throw new Error(
+      "The backend is starting up or unavailable. Please try again in a moment."
+    );
+  }
+}
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("ask");
   const [question, setQuestion] = useState("")
@@ -56,8 +72,8 @@ export default function Home() {
     setRepoError("")
 
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/download-repo",
+      const response = await apiFetch(
+        "/download-repo",
         {
           method: "POST",
           headers: {
@@ -111,8 +127,8 @@ export default function Home() {
     setAnalysisMode(true)
     
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/analyze",
+      const response = await apiFetch(
+        "/analyze",
         {
           method: "POST",
           headers: {
@@ -125,8 +141,6 @@ export default function Home() {
       )
 
       const data = await response.json()
-      console.log("ANALYZE API RESPONSE:", data);
-console.log("ANALYSIS TEXT:", data.analysis);
 
       if(!response.ok){
         throw new Error(
@@ -157,8 +171,8 @@ console.log("ANALYSIS TEXT:", data.analysis);
     setScanResult(null)
 
     try {
-      const res = await fetch(
-        "http://127.0.0.1:8000/scan",
+      const res = await apiFetch(
+        "/scan",
         {
           method: "POST",
           headers: {
@@ -213,8 +227,8 @@ console.log("ANALYSIS TEXT:", data.analysis);
         : { bug_description: question, workspace_id: workspaceId };
 
     try {
-      const response = await fetch(
-        `http://127.0.0.1:8000${endpoint}`,
+      const response = await apiFetch(
+        endpoint,
         {
           method: "POST",
           headers: {
@@ -267,8 +281,8 @@ console.log("ANALYSIS TEXT:", data.analysis);
     setFileError("");
 
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/read-file",
+      const response = await apiFetch(
+        "/read-file",
         {
           method: "POST",
           headers: {
@@ -312,8 +326,8 @@ console.log("ANALYSIS TEXT:", data.analysis);
     setFileAnalysisLoading(true)
 
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/analyze-file",
+      const response = await apiFetch(
+        "/analyze-file",
         {
           method: "POST",
           headers: {

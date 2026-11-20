@@ -1,2 +1,8 @@
-fastapi
-uvicorn[standard]
+# Runtime dependencies for the AI Codebase Agent backend.
+# Versions pinned to the currently working local environment.
+
+fastapi==0.143.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+openai==3.37.0
+python-dotenv==1.2.4

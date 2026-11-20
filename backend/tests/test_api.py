@@ -6,7 +6,9 @@ from unittest.mock import patch
 from app.main import app
 from app.workspace_manager import register_workspace
 
-client = TestClient(app)
+AUTH_HEADERS = {"X-Backend-Key": "test-backend-key"}
+
+client = TestClient(app, headers=AUTH_HEADERS)
 
 
 @pytest.fixture
@@ -30,6 +32,24 @@ def workspace_id(tmp_path):
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
+
+
+def test_health_is_public():
+    anonymous = TestClient(app)
+    response = anonymous.get("/health")
+    assert response.status_code == 200
+
+
+def test_protected_endpoint_requires_key():
+    anonymous = TestClient(app)
+    response = anonymous.post("/scan", json={"folder": "."})
+    assert response.status_code == 401
+
+
+def test_wrong_key_is_rejected():
+    anonymous = TestClient(app, headers={"X-Backend-Key": "wrong-key"})
+    response = anonymous.post("/scan", json={"folder": "."})
+    assert response.status_code == 401
 
 
 def test_scan(workspace_id):

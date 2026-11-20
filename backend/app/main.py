@@ -1,5 +1,7 @@
-from fastapi import FastAPI , HTTPException
-from pydantic import BaseModel
+import os
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from app.scanner import scan_repo
 from app.file_reader import read_repo_file
@@ -7,18 +9,103 @@ from app.file_collector import collect_repository_files
 from app.ai_service import ask_gemini
 from app.retriever import retrieve_relevant_files
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.github_service import download_github_repo
 from app.workspace_manager import (register_workspace, get_workspace,)
+from app.security import (
+    MAX_BODY_BYTES,
+    PUBLIC_PATHS,
+    check_ai_rate_limit,
+    check_clone_rate_limit,
+    secret_matches,
+)
+
+IS_PRODUCTION = bool(os.getenv("RENDER")) or os.getenv(
+    "ENVIRONMENT", ""
+).lower() == "production"
+
+# Interactive docs are disabled in production (routes are None). Locally they
+# stay reachable without the server key so they can be opened in a browser.
+if not IS_PRODUCTION:
+    PUBLIC_PATHS.update({"/docs", "/redoc", "/openapi.json"})
+
+def get_allowed_origins() -> list[str]:
+    raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+
+    origins = [
+        origin.strip()
+        for origin in raw_origins.split(",")
+    ]
+
+    return [
+        origin
+        for origin in origins
+        if origin and origin != "*"
+    ] or ["http://localhost:3000"]
+
 
 app = FastAPI(
     title = "AI Codebase Agent",
     description = "AI-powered codebase analysis backend",
-    version = "0.2.0"
+    version = "0.2.0",
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
+
+@app.middleware("http")
+async def enforce_body_size(request: Request, call_next):
+    if request.method in {"POST", "PUT", "PATCH"}:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                too_large = int(content_length) > MAX_BODY_BYTES
+            except ValueError:
+                too_large = True
+            if too_large:
+                return JSONResponse(
+                    {"detail": "Request body is too large."},
+                    status_code=413,
+                )
+
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_backend_key(request: Request, call_next):
+    path = request.url.path
+    if (
+        request.method == "OPTIONS"
+        or path in PUBLIC_PATHS
+        or path.rstrip("/") in PUBLIC_PATHS
+    ):
+        return await call_next(request)
+
+    expected = os.getenv("BACKEND_API_KEY", "")
+
+    if not expected:
+        return JSONResponse(
+            {"detail": "Server authentication is not configured."},
+            status_code=503,
+        )
+
+    provided = request.headers.get("x-backend-key", "")
+
+    if not secret_matches(provided, expected):
+        return JSONResponse(
+            {"detail": "Unauthorized."},
+            status_code=401,
+        )
+
+    return await call_next(request)
+
+
+# Registered last so it is the outermost middleware: CORS headers are also
+# applied to authentication and rate-limit error responses.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,8 +128,8 @@ def require_workspace(workspace_id: str | None):
         ) from error
 
 class ScanRequest(BaseModel):
-    folder: str = "."
-    workspace_id: str | None = None
+    folder: str = Field(default=".", max_length=256)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 @app.get("/health")
 def health_check():
@@ -69,8 +156,8 @@ def scan_endpoint(req: ScanRequest):
         ) from error
 
 class ReadFileRequest(BaseModel):
-    path: str
-    workspace_id: str | None = None
+    path: str = Field(..., max_length=512)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 @app.post("/read-file")
 def read_file_endpoint(req: ReadFileRequest):
@@ -88,8 +175,8 @@ def read_file_endpoint(req: ReadFileRequest):
 
 
 class CollectRequest(BaseModel):
-    folder: str = "."
-    workspace_id: str | None = None
+    folder: str = Field(default=".", max_length=256)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/collect")
@@ -111,13 +198,14 @@ def collect_endpoint(req: CollectRequest):
 
 
 class AskAIRequest(BaseModel):
-    prompt: str
-    workspace_id: str | None = None
+    prompt: str = Field(..., max_length=4000)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 @app.post("/ask-ai")
-def ask_ai_endpoint(req: AskAIRequest):
+def ask_ai_endpoint(req: AskAIRequest, request: Request):
     try:
 
+        check_ai_rate_limit(request)
         project_root = require_workspace(req.workspace_id)
         result = collect_repository_files(
             ".",
@@ -190,16 +278,17 @@ User question:
         print("AI ERRORRRR:", repr(error), flush=True)
         raise HTTPException(
             status_code= 500,
-            detail=f"AI request failed: {type(error).__name__}: {error}"
+            detail="AI request failed. Please try again."
         ) from error
 
 class AnalyzeRequest(BaseModel):
-    workspace_id: str | None = None
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 @app.post("/analyze")
-def analyze_codebase(req: AnalyzeRequest):
+def analyze_codebase(req: AnalyzeRequest, request: Request):
     try:
-        
+
+        check_ai_rate_limit(request)
         project_root = require_workspace(req.workspace_id)
         result = collect_repository_files(
             ".",
@@ -289,13 +378,14 @@ Repository source code:
 
 
 class FixRequest(BaseModel):
-    bug_description: str
-    workspace_id: str | None = None
+    bug_description: str = Field(..., max_length=2000)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/suggest-fix")
-def suggest_fix_endpoint(req: FixRequest):
+def suggest_fix_endpoint(req: FixRequest, request: Request):
     try:
+        check_ai_rate_limit(request)
         if not req.bug_description.strip():
             raise HTTPException(
                 status_code=400,
@@ -409,15 +499,16 @@ User's bug description:
 
 
 class AnalyzeFileRequest(BaseModel):
-    path: str
-    question: str
-    workspace_id: str | None = None
+    path: str = Field(..., max_length=512)
+    question: str = Field(..., max_length=2000)
+    workspace_id: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/analyze-file")
-def analyze_file_endpoint(req: AnalyzeFileRequest):
+def analyze_file_endpoint(req: AnalyzeFileRequest, request: Request):
     try:
-            
+
+        check_ai_rate_limit(request)
         project_root = require_workspace(req.workspace_id)
 
         file_data = read_repo_file(
@@ -483,13 +574,14 @@ Important rules:
 
 
 class DownloadRepoRequest(BaseModel):
-    url: str
+    url: str = Field(..., max_length=512)
 
 
 @app.post("/download-repo")
-def download_repo_endpoint(req: DownloadRepoRequest):
+def download_repo_endpoint(req: DownloadRepoRequest, request: Request):
 
     try:
+        check_clone_rate_limit(request)
         result = download_github_repo(req.url)
 
         workspace_id = register_workspace(
@@ -501,6 +593,9 @@ def download_repo_endpoint(req: DownloadRepoRequest):
             "workspace_id": workspace_id,
             "repository_url": result["repository_url"],
         }
+
+    except HTTPException:
+        raise
 
     except ValueError as error:
         raise HTTPException(
