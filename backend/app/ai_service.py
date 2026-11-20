@@ -15,8 +15,8 @@ if not api_key:
 client = OpenAI(
     api_key= api_key,
     base_url= "https://openrouter.ai/api/v1",
-    timeout=60.0,
-    max_retries=2,
+    timeout=float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120")),
+    max_retries=int(os.getenv("OPENROUTER_MAX_RETRIES", "1")),
 )
     
 # client = genai.Client(api_key = api_key)
@@ -31,7 +31,7 @@ client = OpenAI(
 
 def ask_gemini(prompt: str) -> str:
     response = client.chat.completions.create(
-        model = "openrouter/free",
+        model = os.getenv("OPENROUTER_MODEL", "openrouter/free"),
         messages= [
             {
                 "role": "user",

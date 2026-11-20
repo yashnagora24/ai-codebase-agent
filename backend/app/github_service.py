@@ -5,6 +5,22 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+
+MAX_REPO_BYTES = int(os.getenv("MAX_REPO_BYTES", str(150 * 1024 * 1024)))
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for filename in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, filename))
+            except OSError:
+                continue
+
+    return total
+
 def validate_github_url(url: str) -> str:
     pattern = (
         r"^https://github\.com/"
@@ -69,6 +85,9 @@ def download_github_repo(url: str) -> dict:
 
         if result.returncode !=0:
             raise ValueError("Could not download GitHub repository.")
+
+        if _directory_size(workspace_path) > MAX_REPO_BYTES:
+            raise ValueError("Repository is too large to analyze.")
 
         return {
             "repository_url": repo_url,
